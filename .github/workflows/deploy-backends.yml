@@ -1,0 +1,59 @@
+name: Deploy Backends (Ventas + Despachos)
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "back-Ventas_SpringBoot/**"
+      - "back-Despachos_SpringBoot/**"
+
+jobs:
+  build-push-deploy-backends:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Configurar credenciales AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login en Amazon ECR (runner)
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build imagen backend-ventas y push a ECR
+      run: |
+        cd back-Ventas_SpringBoot
+        docker build -t backend-ventas .
+        docker tag backend-ventas:latest ${{ secrets.ECR_REPO_URL_BACKEND_VENTAS }}:latest
+        docker push ${{ secrets.ECR_REPO_URL_BACKEND_VENTAS }}:latest
+
+    - name: Build imagen backend-despachos y push a ECR
+      run: |
+        cd ../back-Despachos_SpringBoot
+        docker build -t backend-despachos .
+        docker tag backend-despachos:latest ${{ secrets.ECR_REPO_URL_BACKEND_DESPACHOS }}:latest
+        docker push ${{ secrets.ECR_REPO_URL_BACKEND_DESPACHOS }}:latest
+
+    - name: Desplegar Backends vía SSM
+      run: |
+        echo '${{ secrets.DOCKER_COMPOSE_BACKENDS }}' > docker-compose.backends.yml
+        aws ssm send-command \
+          --instance-ids ${{ secrets.EC2_BACKENDS_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --comment "Actualizar backends desde ECR" \
+          --parameters '{"commands":[
+            "set -e",
+            "echo '"'"'${{ secrets.DOCKER_COMPOSE_BACKENDS }}'"'"' > /home/ec2-user/docker-compose.backends.yml",
+            "sed -i 's|${ECR_REGISTRY}|'${{ secrets.ECR_REGISTRY }}'|g' /home/ec2-user/docker-compose.backends.yml",
+            "aws ecr get-login-password --region '${{ secrets.AWS_REGION }}' | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}",
+            "docker compose -f /home/ec2-user/docker-compose.backends.yml down || true",
+            "docker compose -f /home/ec2-user/docker-compose.backends.yml up -d --build",
+            "docker image prune -f"
+          ]}' \
+          --output text

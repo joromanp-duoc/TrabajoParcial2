@@ -1,0 +1,49 @@
+name: Deploy MySQL
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "data/**"
+
+jobs:
+  build-push-deploy-mysql:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Configurar credenciales AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login en Amazon ECR (runner)
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build imagen MySQL y push a ECR
+      run: |
+        docker build -t mysql-despacho -f Dockerfile.mysql .
+        docker tag mysql-despacho:latest ${{ secrets.ECR_REPO_URL_MYSQL }}:latest
+        docker push ${{ secrets.ECR_REPO_URL_MYSQL }}:latest
+
+    - name: Desplegar MySQL vía SSM
+      run: |
+        aws ssm send-command \
+          --instance-ids ${{ secrets.EC2_MYSQL_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --comment "Actualizar mysql-despacho desde ECR" \
+          --parameters '{"commands":[
+            "set -e",
+            "aws ecr get-login-password --region '${{ secrets.AWS_REGION }}' | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}",
+            "docker pull ${{ secrets.ECR_REPO_URL_MYSQL }}:latest",
+            "docker stop mysql-despacho || true",
+            "docker rm mysql-despacho || true",
+            "docker run -d --name mysql-despacho -p 3306:3306 -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} -v mysql-data:/var/lib/mysql ${{ secrets.ECR_REPO_URL_MYSQL }}:latest",
+            "docker image prune -f"
+          ]}' \
+          --output text
